@@ -5,8 +5,14 @@
 [![YOLOv8-Pose](https://img.shields.io/badge/YOLOv8--Pose-Nano-green.svg)](https://docs.ultralytics.com/)
 [![Inference Speed](https://img.shields.io/badge/Inference-1.4ms%20%28~700%20FPS%29-brightgreen.svg)]()
 [![Keypoint Accuracy](https://img.shields.io/badge/mAP50--95-99.3%25-success.svg)]()
+### What Does This Repo Do?
+This repository provides an autonomous, real-time vision system that estimates the complete **3D spatial state (Grip Position, Roll / 3D Flip, Pitch, and Yaw)** of tools (such as hammers) using a standard monocular RGB camera and lightweight deep learning (YOLOv8-Pose).
 
-An autonomous, monocular computer vision system designed for planetary rovers (**University Rover Challenge - Delivery & Astronaut Assistance Mission**) to detect tools on the ground, estimate their **full 3D spatial state (Roll, Pitch, Yaw, and 3D Position)**, and guide a robot arm and claw gripper for autonomous pick-and-place.
+### What Problem Does It Solve?
+Standard 2D object detection (bounding boxes) is insufficient for robotic grasping and manipulation:
+1. **Missing Heading Angle (Yaw):** A bounding box cannot tell a robot arm what angle to rotate its wrist servo to match the tool handle.
+2. **Missing 3D Flip & Roll State:** Tools like hammers are physically asymmetric — they have a flat striking face on one side and a sharp curved claw on the other. Grasping a tool without knowing whether the claw faces **LEFT or RIGHT** causes gripper fingers to crash directly into the sharp claw spike.
+3. **Manual Labeling Bottleneck:** Training custom keypoint models traditionally requires manually clicking thousands of image annotations. This repository includes a fully automated pipeline using **FastSAM**, **PCA**, and **Euclidean Distance Transform** that generates thousands of verified, sub-pixel accurate keypoint labels directly from raw video with zero human intervention.
 
 ---
 
@@ -20,7 +26,7 @@ The system regresses 5 keypoints and computes the 3D orientation and flip state 
 | ![5-Point Left Flip](assets/preview_5pt_flip_left.jpg) | ![5-Point Sample](assets/preview_5pt_flip_sample1.jpg) |
 
 ### 2. Anatomical Keypoint Systems
-We provide two separate systems depending on your rover's manipulation needs:
+We provide two separate systems depending on your robotic manipulation needs:
 
 | System 1: 3-Point Handle Model (`[Head, Grab, Tail]`) | System 2: Head Crossbar Model (`[Claw, Face]`) |
 | :---: | :---: |
@@ -28,14 +34,14 @@ We provide two separate systems depending on your rover's manipulation needs:
 
 ---
 
-## Why This System?
+## Key Technical Advantages
 
-1. **Solves the Claw Asymmetry Problem:**
-   A hammer is not symmetric. If a robot claw grabs the handle without knowing which side the sharp claw curved spike is facing, the claw fingers can crash into the spike. This system determines **3D Flip (Left vs. Right)** with **100% accuracy**.
+1. **Solves the Tool Asymmetry Problem:**
+   Determines the discrete **3D Flip (Left vs. Right)** state with **100% accuracy**, allowing robotic grippers to offset laterally and avoid colliding with the curved claw spike.
 2. **Ultra-Fast Edge Inference:**
-   Runs at **1.4 ms per frame** (~700 FPS on an NVIDIA RTX 5050 Laptop GPU), consuming almost zero GPU overhead so the rover's main computer can simultaneously run SLAM, obstacle avoidance, and path planning.
+   Runs at **1.4 ms per frame** (~700 FPS on an NVIDIA RTX 5050 Laptop GPU), consuming minimal GPU overhead and leaving compute free for SLAM, navigation, and motion planning.
 3. **Zero Manual Labeling Required:**
-   Includes an offline automated pipeline that uses **FastSAM**, **PCA (Principal Component Analysis)**, and **Euclidean Distance Transform** to automatically label thousands of training images directly from raw camera video.
+   Includes an offline automated pipeline that automatically annotates training images directly from raw camera video.
 
 ---
 
@@ -147,7 +153,7 @@ tau = (dx_handle * dy_head) - (dy_handle * dx_head)
 * If tau >= 0: **FLIP: LEFT** (Curved claw points to the left).
 * If tau < 0: **FLIP: RIGHT** (Curved claw points to the right).
 
-When the rover approaches, if `FLIP: LEFT` is detected, the claw offsets slightly to the right so the jaws clear the sharp curved claw tip!
+During robotic approach, if `FLIP: LEFT` is detected, the claw offsets slightly to the right so the jaws clear the sharp curved claw tip!
 
 ### 3. Out-of-Plane Elevation Angle (Pitch)
 When the hammer rests on an uneven rock or terrain obstacle, the handle appears shorter in the camera image (perspective foreshortening). Because the physical tool dimensions are known and constant, the ratio between the head crossbar length and handle length gives the tilt angle:
@@ -246,4 +252,4 @@ For full mathematical proofs, robotic state machines, and FastSAM distillation d
 ---
 
 ## License
-Developed for the **University Rover Challenge (URC 2027)**. Released under the MIT License.
+Released under the MIT License.
