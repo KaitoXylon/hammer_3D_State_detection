@@ -1,0 +1,11 @@
+# YOLO-Pose 5-Keypoint Hammer Dataset (Flip Detection)
+path: /home/mt/hameer detect/dataset_flip
+train: images/train
+val: images/val
+
+# 5 Keypoints: [Face, Claw, HeadCenter, Grip, Tail]
+kpt_shape: [5, 3]
+flip_idx: []
+
+names:
+  0: hammer

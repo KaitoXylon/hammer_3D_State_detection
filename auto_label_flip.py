@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+5-KEYPOINT AUTO-LABELING PIPELINE: [HEAD, GRAB, TAIL + 2 HEAD POINTS (FACE, CLAW)]
+================================================================================
+University Rover Challenge (URC) - 3D Pose & Flip Orientation
+
+Dedicated standalone auto-labeler for the 5-point flip model:
+  K1: Face (Striking Head Edge)          <-- Head Point 1
+  K2: Claw (Curved Tip Edge)             <-- Head Point 2
+  K3: Head Center (Medial T-Junction)    <-- Head Center
+  K4: Grab Point (Grip Target)           <-- Grab Point
+  K5: Tail Base (Handle Bottom)          <-- Tail Point
+
+Enables:
+  - Grip Target (X, Y)
+  - Yaw Heading Angle (ψ)
+  - Pitch Foreshortening Angle (θ)
+  - Full 3D Roll / Flip State: 'FLIP: LEFT' vs. 'FLIP: RIGHT'
+
+Outputs:
+  - Dataset: 'dataset_flip/images/' and 'dataset_flip/labels/'
+  - YAML Config: 'hammer_pose_flip.yaml'
+  - Verification Previews: 'dataset_flip/previews/'
+
+Usage:
+  python3 auto_label_flip.py                     # Auto-label from default video
+  python3 auto_label_flip.py --video my_vid.mp4  # Auto-label from custom video
+  python3 auto_label_flip.py --train             # Auto-label and immediately train
+================================================================================
+"""
+
+import os
+import sys
+import time
+import shutil
+import argparse
+import glob
+import cv2
+import numpy as np
+import torch
+from ultralytics import FastSAM
+
+
+def compute_sharpness(gray_img):
+    return cv2.Laplacian(gray_img, cv2.CV_64F).var()
+
+
+def select_hammer_mask(res, img_w, img_h, min_area=15000, max_area=250000, min_aspect=1.2, max_aspect=6.5):
+    if res.masks is None or len(res.boxes) == 0:
+        return None
+
+    boxes = res.boxes.xyxy.cpu().numpy()
+    masks = res.masks.data.cpu().numpy()
+    center_img = np.array([img_w / 2.0, img_h / 2.0])
+
+    best_mask = None
+    min_dist = float("inf")
+
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2 = box
+        bw = x2 - x1
+        bh = y2 - y1
+        area = bw * bh
+        aspect = max(bw, bh) / max(1.0, min(bw, bh))
+
+        if area < min_area or area > max_area:
+            continue
+        if aspect < min_aspect or aspect > max_aspect:
+            continue
+        if x1 < 5 or y1 < 5 or x2 > (img_w - 5) or y2 > (img_h - 5):
+            continue
+
+        box_center = np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0])
+        dist = np.linalg.norm(box_center - center_img)
+        if dist < min_dist:
+            min_dist = dist
+            m = (masks[i] * 255).astype(np.uint8)
+            best_mask = cv2.resize(m, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
+
+    return best_mask
+
+
+def snap_to_medial_spine(pt, dist_map, img_w, img_h, search_radius=25):
+    x, y = int(pt[0]), int(pt[1])
+    y1, y2 = max(0, y - search_radius), min(img_h, y + search_radius)
+    x1, x2 = max(0, x - search_radius), min(img_w, x + search_radius)
+
+    roi = dist_map[y1:y2, x1:x2]
+    if roi.size == 0 or np.max(roi) == 0:
+        return pt
+
+    loc = np.unravel_index(np.argmax(roi), roi.shape)
+    return np.array([x1 + loc[1], y1 + loc[0]], dtype=float)
+
+
+def extract_5_keypoints(mask, img_w, img_h):
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    c = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(c) < 10000:
+        return None
+
+    dist_map = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+
+    # 1. Primary handle axis via PCA
+    y_idx, x_idx = np.where(mask > 0)
+    coords = np.column_stack((x_idx, y_idx)).astype(np.float32)
+    mean, eigenvectors = cv2.PCACompute(coords, mean=None)
+    center = mean[0]
+    axis_handle = eigenvectors[0]
+
+    projs = np.dot(coords - center, axis_handle)
+    p_min = center + np.min(projs) * axis_handle
+    p_max = center + np.max(projs) * axis_handle
+
+    length = np.linalg.norm(p_min - p_max)
+    if length < 80:
+        return None
+
+    # 2. Head vs. Tail density test
+    r = int(length * 0.15)
+    d_min = np.sum(mask[max(0, int(p_min[1]-r)):min(img_h, int(p_min[1]+r)),
+                        max(0, int(p_min[0]-r)):min(img_w, int(p_min[0]+r))] > 0)
+    d_max = np.sum(mask[max(0, int(p_max[1]-r)):min(img_h, int(p_max[1]+r)),
+                        max(0, int(p_max[0]-r)):min(img_w, int(p_max[0]+r))] > 0)
+
+    if d_min > d_max:
+        head_raw, tail_raw = p_min, p_max
+        handle_dir = -axis_handle
+    else:
+        head_raw, tail_raw = p_max, p_min
+        handle_dir = axis_handle
+
+    # 3. Head Crossbar axis (perpendicular to handle)
+    axis_head = np.array([-handle_dir[1], handle_dir[0]])
+
+    # Isolate head crossbar coordinates
+    dist_to_head = np.dot(coords - head_raw, handle_dir)
+    head_indices = np.where(dist_to_head > -r * 1.5)[0]
+    if len(head_indices) < 50:
+        return None
+    head_coords = coords[head_indices]
+
+    projs_head = np.dot(head_coords - head_raw, axis_head)
+    t1, t2 = np.min(projs_head), np.max(projs_head)
+    pt1 = head_raw + t1 * axis_head
+    pt2 = head_raw + t2 * axis_head
+
+    # 4. Disambiguate Face (blunt/dense) vs Claw (sharp/tapered)
+    r_tip = 25
+    d1 = np.sum(mask[max(0, int(pt1[1]-r_tip)):min(img_h, int(pt1[1]+r_tip)),
+                        max(0, int(pt1[0]-r_tip)):min(img_w, int(pt1[0]+r_tip))] > 0)
+    d2 = np.sum(mask[max(0, int(pt2[1]-r_tip)):min(img_h, int(pt2[1]+r_tip)),
+                        max(0, int(pt2[0]-r_tip)):min(img_w, int(pt2[0]+r_tip))] > 0)
+
+    if d1 > d2:
+        face_raw, claw_raw = pt1, pt2
+    else:
+        face_raw, claw_raw = pt2, pt1
+
+    # 5. Snap to medial spine
+    face = snap_to_medial_spine(face_raw, dist_map, img_w, img_h, 20)
+    claw = snap_to_medial_spine(claw_raw, dist_map, img_w, img_h, 20)
+    head_center = snap_to_medial_spine(head_raw, dist_map, img_w, img_h, 25)
+    tail = snap_to_medial_spine(tail_raw, dist_map, img_w, img_h, 25)
+    grab_raw = tail + 0.40 * (head_center - tail)
+    grab = snap_to_medial_spine(grab_raw, dist_map, img_w, img_h, 20)
+
+    # 6. Bounding box with 5% padding
+    bx, by, bw, bh = cv2.boundingRect(c)
+    pad_w = int(bw * 0.05)
+    pad_h = int(bh * 0.05)
+    x1 = max(0, bx - pad_w)
+    y1 = max(0, by - pad_h)
+    x2 = min(img_w, bx + bw + pad_w)
+    y2 = min(img_h, by + bh + pad_h)
+    bbox = (x1, y1, x2 - x1, y2 - y1)
+
+    kpts = [face, claw, head_center, grab, tail]
+    return kpts, bbox
+
+
+def render_preview_5pt(frame, kpts):
+    dbg = frame.copy()
+    face, claw, head_center, grab, tail = kpts
+    p_face = tuple(face.astype(int))
+    p_claw = tuple(claw.astype(int))
+    p_head = tuple(head_center.astype(int))
+    p_grab = tuple(grab.astype(int))
+    p_tail = tuple(tail.astype(int))
+
+    # Skeleton
+    cv2.line(dbg, p_tail, p_head, (0, 255, 255), 3)
+    cv2.line(dbg, p_claw, p_face, (0, 255, 255), 3)
+
+    # K1: Face (Red)
+    cv2.circle(dbg, p_face, 12, (255, 255, 255), 2)
+    cv2.circle(dbg, p_face, 8, (0, 0, 255), -1)
+    cv2.putText(dbg, "FACE", (p_face[0] + 12, p_face[1] + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+
+    # K2: Claw (Blue)
+    cv2.circle(dbg, p_claw, 12, (255, 255, 255), 2)
+    cv2.circle(dbg, p_claw, 8, (255, 0, 0), -1)
+    cv2.putText(dbg, "CLAW", (p_claw[0] - 65, p_claw[1] + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 0), 2)
+
+    # K3: Head Center (Yellow)
+    cv2.circle(dbg, p_head, 9, (255, 255, 255), 2)
+    cv2.circle(dbg, p_head, 6, (0, 255, 255), -1)
+
+    # K4: Grab Point (Yellow/Orange)
+    cv2.circle(dbg, p_grab, 9, (255, 255, 255), 2)
+    cv2.circle(dbg, p_grab, 6, (0, 215, 255), -1)
+    cv2.putText(dbg, "GRAB", (p_grab[0] + 12, p_grab[1] + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 215, 255), 2)
+
+    # K5: Tail Base (Blue)
+    cv2.circle(dbg, p_tail, 12, (255, 255, 255), 2)
+    cv2.circle(dbg, p_tail, 8, (255, 0, 0), -1)
+    cv2.putText(dbg, "TAIL", (p_tail[0] + 12, p_tail[1] + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 0), 2)
+
+    # Compute Flip via signed cross product
+    v_handle = np.array(p_head) - np.array(p_tail)
+    v_head = np.array(p_face) - np.array(p_claw)
+    tau = v_handle[0] * v_head[1] - v_handle[1] * v_head[0]
+    flip_text = "FLIP: LEFT (Normal)" if tau >= 0 else "FLIP: RIGHT (Flipped)"
+    flip_color = (0, 255, 0) if tau >= 0 else (0, 165, 255)
+
+    cv2.rectangle(dbg, (15, 15), (420, 60), (20, 20, 20), -1)
+    cv2.putText(dbg, flip_text, (25, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.7, flip_color, 2)
+
+    return dbg
+
+
+def run_pipeline(
+    video_path="hammer_video.mp4",
+    output_dir="dataset_flip",
+    step=8,
+    blur_threshold=8.0,
+    val_ratio=0.20,
+    previews=30,
+    fastsam_weights="FastSAM-s.pt",
+    conf=0.35,
+    device="cuda" if torch.cuda.is_available() else "cpu"
+):
+    print("\n" + "=" * 70)
+    print("   5-KEYPOINT FLIP AUTO-LABELING: [HEAD, GRAB, TAIL + 2 HEAD POINTS]")
+    print("=" * 70)
+
+    if not os.path.exists(video_path):
+        fallbacks = ["edited_video.mp4", "/home/mt/2026-10-17 05-28-25_edited.mp4"]
+        for fb in fallbacks:
+            if os.path.exists(fb):
+                video_path = fb
+                break
+
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+
+    for split in ["train", "val"]:
+        os.makedirs(f"{output_dir}/images/{split}", exist_ok=True)
+        os.makedirs(f"{output_dir}/labels/{split}", exist_ok=True)
+    preview_dir = f"{output_dir}/previews"
+    os.makedirs(preview_dir, exist_ok=True)
+
+    print(f"[INFO] Video       : {video_path}")
+    print(f"[INFO] Output Dir  : {output_dir}/")
+    print(f"[INFO] Keypoints   : 5 Points [Face, Claw, HeadCenter, Grab, Tail]")
+    print(f"[INFO] Device      : {device.upper()}")
+
+    sam = FastSAM(fastsam_weights)
+    cap = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    img_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    img_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    frame_idx = 0
+    saved_count = 0
+    preview_count = 0
+    start_time = time.time()
+    val_interval = int(round(1.0 / val_ratio))
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_idx % step == 0:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if compute_sharpness(gray) >= blur_threshold:
+                res = sam(frame, device=device, retina_masks=True, conf=conf, verbose=False)[0]
+                mask = select_hammer_mask(res, img_w, img_h)
+
+                if mask is not None:
+                    res_kpts = extract_5_keypoints(mask, img_w, img_h)
+                    if res_kpts is not None:
+                        kpts, bbox = res_kpts
+                        bx, by, bw, bh = bbox
+
+                        # Normalization
+                        xc = (bx + bw / 2.0) / img_w
+                        yc = (by + bh / 2.0) / img_h
+                        nw = bw / img_w
+                        nh = bh / img_h
+
+                        kpt_strs = []
+                        for pt in kpts:
+                            kpt_strs.append(f"{pt[0]/img_w:.6f} {pt[1]/img_h:.6f} 2")
+
+                        label_line = f"0 {xc:.6f} {yc:.6f} {nw:.6f} {nh:.6f} " + " ".join(kpt_strs) + "\n"
+                        split = "val" if (saved_count % val_interval == 0) else "train"
+
+                        img_name = f"hammer_flip_{saved_count:05d}.jpg"
+                        lbl_name = f"hammer_flip_{saved_count:05d}.txt"
+
+                        cv2.imwrite(f"{output_dir}/images/{split}/{img_name}", frame)
+                        with open(f"{output_dir}/labels/{split}/{lbl_name}", "w") as f:
+                            f.write(label_line)
+
+                        if preview_count < previews:
+                            dbg = render_preview_5pt(frame, kpts)
+                            cv2.imwrite(f"{preview_dir}/preview_{preview_count:02d}.jpg", dbg)
+                            preview_count += 1
+
+                        saved_count += 1
+
+            if frame_idx % (step * 25) == 0:
+                pct = (frame_idx / max(1, total_frames)) * 100
+                print(f"  [{pct:5.1f}%] Frame {frame_idx:5d}/{total_frames} | Saved: {saved_count:4d} labels")
+
+        frame_idx += 1
+
+    cap.release()
+
+    yaml_path = os.path.join(os.getcwd(), "hammer_pose_flip.yaml")
+    yaml_content = f"""# YOLO-Pose 5-Keypoint Hammer Dataset: [Face, Claw, HeadCenter, Grab, Tail]
+path: {os.path.abspath(output_dir)}
+train: images/train
+val: images/val
+
+# 5 Keypoints: [Face, Claw, HeadCenter, Grab, Tail]
+kpt_shape: [5, 3]
+flip_idx: []
+
+names:
+  0: hammer
+"""
+    with open(yaml_path, "w") as yf:
+        yf.write(yaml_content)
+
+    print("\n" + "=" * 70)
+    print("   5-KEYPOINT FLIP AUTO-LABELING FINISHED!")
+    print(f"   Saved Images : {saved_count}")
+    print(f"   Dataset Dir  : {output_dir}/")
+    print(f"   Config YAML  : {yaml_path}")
+    print(f"   Previews     : {preview_dir}/ ({preview_count} images)")
+    print("=" * 70 + "\n")
+
+    return yaml_path
+
+
+def train_flip(yaml_path, epochs=60):
+    from ultralytics import YOLO
+    print("\n[INFO] Starting training YOLOv8n-pose on 5-Keypoint Flip dataset...")
+    model = YOLO("yolov8n-pose.pt")
+    model.train(
+        data=yaml_path,
+        epochs=epochs,
+        imgsz=640,
+        batch=16,
+        device=0,
+        workers=4,
+        degrees=180.0,
+        fliplr=0.0,
+        flipud=0.0,
+        scale=0.3,
+        save=True,
+        project="runs_flip",
+        name="hammer_flip_best",
+        plots=True
+    )
+    print("\n[DONE] 5-Keypoint Model trained! Weights: runs_flip/hammer_flip_best/weights/best.pt")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Dedicated 5-Keypoint Auto-Labeler: [Head, Grab, Tail + Face, Claw]")
+    parser.add_argument("--video", type=str, default="hammer_video.mp4")
+    parser.add_argument("--output_dir", type=str, default="dataset_flip")
+    parser.add_argument("--step", type=int, default=8)
+    parser.add_argument("--blur_thresh", type=float, default=8.0)
+    parser.add_argument("--previews", type=int, default=30)
+    parser.add_argument("--train", action="store_true", help="Train model immediately after labeling")
+    parser.add_argument("--epochs", type=int, default=60)
+    args = parser.parse_args()
+
+    yaml_path = run_pipeline(
+        video_path=args.video,
+        output_dir=args.output_dir,
+        step=args.step,
+        blur_threshold=args.blur_thresh,
+        previews=args.previews
+    )
+
+    if args.train:
+        train_flip(yaml_path, epochs=args.epochs)
+
+
+if __name__ == "__main__":
+    main()

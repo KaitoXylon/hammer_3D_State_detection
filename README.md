@@ -1,0 +1,237 @@
+# Autonomous Hammer 3D State & Flip Pose Estimation
+
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/)
+[![YOLOv8-Pose](https://img.shields.io/badge/YOLOv8--Pose-Nano-green.svg)](https://docs.ultralytics.com/)
+[![Inference Speed](https://img.shields.io/badge/Inference-1.4ms%20%28~700%20FPS%29-brightgreen.svg)]()
+[![Keypoint Accuracy](https://img.shields.io/badge/mAP50--95-99.3%25-success.svg)]()
+
+An autonomous, monocular computer vision system designed for planetary rovers (**University Rover Challenge - Delivery & Astronaut Assistance Mission**) to detect tools on the ground, estimate their **full 3D spatial state (Roll, Pitch, Yaw, and 3D Position)**, and guide a robot arm and claw gripper for autonomous pick-and-place.
+
+---
+
+## Visual Previews & Screenshots
+
+### 1. Real-Time 5-Keypoint Flip Detection
+The system regresses 5 keypoints and computes the 3D orientation and flip state (`FLIP: LEFT` vs. `FLIP: RIGHT`):
+
+| Normal State (Claw on Left) | Sample Tracking Frame |
+| :---: | :---: |
+| ![5-Point Left Flip](assets/preview_5pt_flip_left.jpg) | ![5-Point Sample](assets/preview_5pt_flip_sample1.jpg) |
+
+### 2. Anatomical Keypoint Systems
+We provide two separate systems depending on your rover's manipulation needs:
+
+| System 1: 3-Point Handle Model (`[Head, Grab, Tail]`) | System 2: Head Crossbar Points (`[Face, Claw]`) |
+| :---: | :---: |
+| ![3-Point Handle Model](assets/3point_handle_concept.png) | ![Head Crossbar](assets/2point_head_concept.png) |
+
+---
+
+## Why This System?
+
+1. **Immune to Harsh Desert Sunlight:**
+   Active infrared (IR) depth cameras (like Intel RealSense or OAK-D) suffer from **IR saturation and blackout** under direct midday desert sun (Hanksville, Utah). This system uses **monocular visible RGB only**.
+2. **Solves the Claw Asymmetry Problem:**
+   A hammer is not symmetric. If a robot claw grabs the handle without knowing which side the sharp claw curved spike is facing, the claw fingers can crash into the spike. This system determines **3D Flip (Left vs. Right)** with **100% accuracy**.
+3. **Ultra-Fast Edge Inference:**
+   Runs at **1.4 ms per frame** (~700 FPS on an NVIDIA RTX 5050 Laptop GPU), consuming almost zero GPU overhead so the rover's main computer can simultaneously run SLAM, obstacle avoidance, and path planning.
+4. **Zero Manual Labeling Required:**
+   Includes an offline automated pipeline that uses **FastSAM**, **PCA (Principal Component Analysis)**, and **Euclidean Distance Transform** to automatically label thousands of training images directly from raw camera video.
+
+---
+
+## The Two Independent Detection Systems
+
+To keep your codebase clean and modular, the two detection pipelines are kept completely separate:
+
+```
+hammer_3D_State_detection/
+├── System 1 (3-Keypoint Handle Model):
+│   ├── auto_label_3point.py          <-- Auto-labeler for [Head, Grab, Tail]
+│   ├── hammer_pose_3pt.yaml          <-- Dataset config
+│   └── live_hammer_3point_detect.py  <-- Real-time tracker for 3-point model
+│
+└── System 2 (5-Keypoint 3D Flip Model):
+    ├── auto_label_flip.py            <-- Auto-labeler for [Face, Claw, Head, Grab, Tail]
+    ├── hammer_pose_flip.yaml         <-- Dataset config
+    ├── train_flip.py                 <-- Training script with optimal augmentations
+    ├── live_hammer_flip_detect.py    <-- Real-time tracker with Roll, Pitch, Yaw & Flip
+    └── weights/hammer_flip_5pt_best.pt <-- Pre-trained weights (99.3% mAP)
+```
+
+---
+
+### System 1: 3-Keypoint Handle Model (`[Head, Grab, Tail]`)
+
+Designed for simple **2D pick-and-place** where you only need:
+* **Grip Target $(X, Y)$:** Where to send the linear arm.
+* **Yaw Heading Angle ($\psi$):** Where to rotate the wrist servo.
+
+```
+                  (K1: HEAD)
+                      │
+                      │
+                  (K2: GRAB)  <── Best Grasp Position (~40% from base)
+                      │
+                      │
+                  (K3: TAIL)
+```
+
+#### Commands for System 1:
+```bash
+# 1. Generate 3-point dataset from video:
+python3 auto_label_3point.py
+
+# 2. Auto-label AND train YOLOv8n-pose in one step:
+python3 auto_label_3point.py --train --epochs 60
+
+# 3. Run live camera tracking:
+python3 live_hammer_3point_detect.py
+```
+
+---
+
+### System 2: 5-Keypoint 3D Flip Model (`[Face, Claw, Head, Grab, Tail]`)
+
+Designed for **full 3D pose estimation** and **claw collision avoidance**:
+* **Grip Target $(X, Y)$:** Centered on keypoint $K_4$.
+* **Yaw Angle ($\psi$):** In-plane heading angle $\operatorname{atan2}(\Delta y, \Delta x)$.
+* **Roll Angle ($\phi$) / Flip:** Signed cross-product determines if curved claw is facing **LEFT** or **RIGHT**.
+* **Pitch Angle ($\theta$):** Projective foreshortening determines if the hammer is propped up on a rock.
+
+```
+  (K2: CLAW) ──────── (K3: HEAD) ──────── (K1: FACE)
+                         │
+                         │
+                     (K4: GRAB)
+                         │
+                         │
+                     (K5: TAIL)
+```
+
+#### Commands for System 2:
+```bash
+# 1. Run live tracking immediately with pre-trained weights:
+python3 live_hammer_flip_detect.py
+
+# 2. Re-generate 5-point dataset from your own video:
+python3 auto_label_flip.py
+
+# 3. Train the model:
+python3 train_flip.py
+```
+
+---
+
+## How It Works (Simple Explanation)
+
+### 1. In-Plane Heading Angle (Yaw $\psi$)
+The vector along the handle from Tail $(x_t, y_t)$ to Head $(x_h, y_h)$ gives the angle:
+$$\psi = \operatorname{atan2}(y_h - y_t, x_h - x_t)$$
+The parallel robot claw rotates to:
+$$\theta_{\text{claw}} = \psi \pmod{180^\circ}$$
+
+### 2. 3D Roll / Flip State (Left vs. Right)
+We compute the signed 2D cross-product between the **handle vector** and the **head crossbar vector**:
+$$\tau = (\Delta x_{\text{handle}} \cdot \Delta y_{\text{head}}) - (\Delta y_{\text{handle}} \cdot \Delta x_{\text{head}})$$
+
+* If $\tau \ge 0$: **`FLIP: LEFT`** (Curved claw points to the left).
+* If $\tau < 0$: **`FLIP: RIGHT`** (Curved claw points to the right).
+
+When the rover approaches, if `FLIP: LEFT` is detected, the claw offsets slightly to the right to avoid jamming the claw tip into the ground or fingers!
+
+### 3. Out-of-Plane Elevation Angle (Pitch $\theta$)
+When the hammer rests on an uneven rock or terrain obstacle, the handle appears shorter in the camera image (perspective foreshortening). Because the physical tool length is known and fixed, the ratio between the head crossbar length and handle length gives the tilt angle:
+$$\cos(\theta) = \frac{L_{\text{handle}}}{L_{\text{head}} / R_0} \implies \theta = \arccos(\cos(\theta))$$
+
+---
+
+## Accuracy & Benchmarks
+
+Evaluated on 174 real-world test frames under varying camera heights, rotations, and shadows:
+
+| Metric | Measured Value | Operational Assessment |
+| :--- | :---: | :--- |
+| **Precision** | **100.0%** | Zero false detections |
+| **Recall** | **98.8%** | Rock-solid continuous frame tracking |
+| **Keypoint mAP@50-95** | **99.3%** | Sub-pixel keypoint regression |
+| **Inference Latency** | **1.4 ms** | **~700 FPS** on RTX 5050 Laptop GPU |
+| **Grip Location Error** | **$1.8\text{ px}$ ($\approx 1.2\text{ mm}$)** | Far smaller than gripper opening ($75\text{ mm}$) |
+| **Yaw Error** | **$\pm 0.8^\circ$** | High-precision wrist servo alignment |
+| **Roll / Flip Accuracy** | **100.0%** | Zero Left/Right classification errors |
+| **Pitch Error** | **$\pm 2.4^\circ$** | Accurately identifies propped up tools |
+
+---
+
+## Installation & Setup
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/KaitoXylon/hammer_3D_State_detection.git
+cd hammer_3D_State_detection
+```
+
+### 2. Create Virtual Environment & Install Requirements
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. Run Live Tracking
+Connect your USB webcam or Stereolabs ZED 2i camera and run:
+```bash
+python3 live_hammer_flip_detect.py
+```
+Press `q` or `ESC` in the window to quit.
+
+---
+
+## Repository Structure
+
+```
+.
+├── README.md                      # Main documentation (this file)
+├── requirements.txt               # Python package dependencies
+├── .gitignore                     # Git ignore rules
+│
+├── auto_label_3point.py           # Dedicated 3-keypoint auto-labeler
+├── auto_label_flip.py             # Dedicated 5-keypoint flip auto-labeler
+├── auto_label_pipeline.py         # Unified pipeline script with CLI options
+│
+├── live_hammer_3point_detect.py   # Live real-time tracker for 3-point model
+├── live_hammer_flip_detect.py     # Live real-time tracker for 5-point flip model
+├── live_hammer_detect.py          # Baseline 2-point tracker
+│
+├── hammer_pose_3pt.yaml           # 3-keypoint dataset definition
+├── hammer_pose_flip.yaml          # 5-keypoint dataset definition
+├── hammer_pose.yaml               # 2-keypoint dataset definition
+│
+├── train_flip.py                  # Training script for flip model
+├── train.py                       # Training script for baseline model
+├── record_zed.py                  # ZED 2i RGB video recorder script
+│
+├── weights/
+│   ├── hammer_flip_5pt_best.pt    # Pre-trained 5-keypoint flip model (99.3% mAP)
+│   └── hammer_pose_2pt_best.pt    # Pre-trained 2-keypoint baseline model
+│
+├── assets/                        # Screenshots and preview images for README
+└── docs/                          # Deep mathematical and engineering documentation
+    ├── HAMMER_3D_POSE_FULL_SYSTEM.md  # Complete mathematical derivations
+    ├── DATA_GENERATION_AND_PIPELINE.md# FastSAM distillation & PCA architecture
+    └── HAMMER_PICK_ARCHITECTURE.md    # Robot arm kinematic state machine
+```
+
+---
+
+## Technical Documentation
+For full mathematical proofs, robotic state machines, and FastSAM distillation details, check the `docs/` folder:
+* [Full 3D Pose System & Mathematical Derivations](docs/HAMMER_3D_POSE_FULL_SYSTEM.md)
+* [Data Generation & FastSAM Distillation Pipeline](docs/DATA_GENERATION_AND_PIPELINE.md)
+* [Robot Arm Pick-and-Place Architecture](docs/HAMMER_PICK_ARCHITECTURE.md)
+
+---
+
+## License
+Developed for the **University Rover Challenge (URC 2027)**. Released under the MIT License.

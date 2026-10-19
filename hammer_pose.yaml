@@ -1,0 +1,10 @@
+# YOLO-Pose Dense Dataset
+path: /home/mt/hameer detect/dataset
+train: images/train
+val: images/val
+
+kpt_shape: [2, 3] # [Head, Tail]
+flip_idx: []
+
+names:
+  0: hammer

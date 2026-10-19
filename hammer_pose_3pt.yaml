@@ -1,0 +1,11 @@
+# YOLO-Pose 3-Keypoint Hammer Dataset: [Head, Grab, Tail]
+path: /home/mt/hameer detect/dataset_3pt
+train: images/train
+val: images/val
+
+# 3 Keypoints: [Head, Grab, Tail]
+kpt_shape: [3, 3]
+flip_idx: []
+
+names:
+  0: hammer
