@@ -22,21 +22,19 @@ The system regresses 5 keypoints and computes the 3D orientation and flip state 
 ### 2. Anatomical Keypoint Systems
 We provide two separate systems depending on your rover's manipulation needs:
 
-| System 1: 3-Point Handle Model (`[Head, Grab, Tail]`) | System 2: Head Crossbar Points (`[Face, Claw]`) |
+| System 1: 3-Point Handle Model (`[Head, Grab, Tail]`) | System 2: Head Crossbar Model (`[Claw, Face]`) |
 | :---: | :---: |
-| ![3-Point Handle Model](assets/3point_handle_concept.png) | ![Head Crossbar](assets/2point_head_concept.png) |
+| ![3-Point Handle Model](assets/3point_handle_concept.png) | ![Claw and Face Head Crossbar](assets/2point_head_concept.png) |
 
 ---
 
 ## Why This System?
 
-1. **Immune to Harsh Desert Sunlight:**
-   Active infrared (IR) depth cameras (like Intel RealSense or OAK-D) suffer from **IR saturation and blackout** under direct midday desert sun (Hanksville, Utah). This system uses **monocular visible RGB only**.
-2. **Solves the Claw Asymmetry Problem:**
+1. **Solves the Claw Asymmetry Problem:**
    A hammer is not symmetric. If a robot claw grabs the handle without knowing which side the sharp claw curved spike is facing, the claw fingers can crash into the spike. This system determines **3D Flip (Left vs. Right)** with **100% accuracy**.
-3. **Ultra-Fast Edge Inference:**
+2. **Ultra-Fast Edge Inference:**
    Runs at **1.4 ms per frame** (~700 FPS on an NVIDIA RTX 5050 Laptop GPU), consuming almost zero GPU overhead so the rover's main computer can simultaneously run SLAM, obstacle avoidance, and path planning.
-4. **Zero Manual Labeling Required:**
+3. **Zero Manual Labeling Required:**
    Includes an offline automated pipeline that uses **FastSAM**, **PCA (Principal Component Analysis)**, and **Euclidean Distance Transform** to automatically label thousands of training images directly from raw camera video.
 
 ---
@@ -65,8 +63,8 @@ hammer_3D_State_detection/
 ### System 1: 3-Keypoint Handle Model (`[Head, Grab, Tail]`)
 
 Designed for simple **2D pick-and-place** where you only need:
-* **Grip Target $(X, Y)$:** Where to send the linear arm.
-* **Yaw Heading Angle ($\psi$):** Where to rotate the wrist servo.
+* **Grip Target (X, Y):** Where to send the linear arm.
+* **Yaw Heading Angle:** Where to rotate the wrist servo.
 
 ```
                   (K1: HEAD)
@@ -95,10 +93,10 @@ python3 live_hammer_3point_detect.py
 ### System 2: 5-Keypoint 3D Flip Model (`[Face, Claw, Head, Grab, Tail]`)
 
 Designed for **full 3D pose estimation** and **claw collision avoidance**:
-* **Grip Target $(X, Y)$:** Centered on keypoint $K_4$.
-* **Yaw Angle ($\psi$):** In-plane heading angle $\operatorname{atan2}(\Delta y, \Delta x)$.
-* **Roll Angle ($\phi$) / Flip:** Signed cross-product determines if curved claw is facing **LEFT** or **RIGHT**.
-* **Pitch Angle ($\theta$):** Projective foreshortening determines if the hammer is propped up on a rock.
+* **Grip Target (X, Y):** Centered on keypoint K4.
+* **Yaw Angle:** In-plane heading angle `atan2(dy, dx)`.
+* **Roll Angle / Flip:** Signed cross-product determines if curved claw is facing **LEFT** or **RIGHT**.
+* **Pitch Angle:** Projective foreshortening determines if the hammer is propped up on a rock.
 
 ```
   (K2: CLAW) ──────── (K3: HEAD) ──────── (K1: FACE)
@@ -126,24 +124,38 @@ python3 train_flip.py
 
 ## How It Works (Simple Explanation)
 
-### 1. In-Plane Heading Angle (Yaw $\psi$)
-The vector along the handle from Tail $(x_t, y_t)$ to Head $(x_h, y_h)$ gives the angle:
-$$\psi = \operatorname{atan2}(y_h - y_t, x_h - x_t)$$
-The parallel robot claw rotates to:
-$$\theta_{\text{claw}} = \psi \pmod{180^\circ}$$
+### 1. In-Plane Heading Angle (Yaw)
+The vector along the handle from Tail (xt, yt) to Head (xh, yh) gives the heading angle:
+
+```
+yaw = atan2(yh - yt, xh - xt)
+```
+
+The parallel robot claw rotates to align with the handle:
+
+```
+claw_servo_angle = yaw % 180
+```
 
 ### 2. 3D Roll / Flip State (Left vs. Right)
-We compute the signed 2D cross-product between the **handle vector** and the **head crossbar vector**:
-$$\tau = (\Delta x_{\text{handle}} \cdot \Delta y_{\text{head}}) - (\Delta y_{\text{handle}} \cdot \Delta x_{\text{head}})$$
+We compute the signed 2D cross-product between the handle vector and the head crossbar vector:
 
-* If $\tau \ge 0$: **`FLIP: LEFT`** (Curved claw points to the left).
-* If $\tau < 0$: **`FLIP: RIGHT`** (Curved claw points to the right).
+```
+tau = (dx_handle * dy_head) - (dy_handle * dx_head)
+```
 
-When the rover approaches, if `FLIP: LEFT` is detected, the claw offsets slightly to the right to avoid jamming the claw tip into the ground or fingers!
+* If tau >= 0: **FLIP: LEFT** (Curved claw points to the left).
+* If tau < 0: **FLIP: RIGHT** (Curved claw points to the right).
 
-### 3. Out-of-Plane Elevation Angle (Pitch $\theta$)
-When the hammer rests on an uneven rock or terrain obstacle, the handle appears shorter in the camera image (perspective foreshortening). Because the physical tool length is known and fixed, the ratio between the head crossbar length and handle length gives the tilt angle:
-$$\cos(\theta) = \frac{L_{\text{handle}}}{L_{\text{head}} / R_0} \implies \theta = \arccos(\cos(\theta))$$
+When the rover approaches, if `FLIP: LEFT` is detected, the claw offsets slightly to the right so the jaws clear the sharp curved claw tip!
+
+### 3. Out-of-Plane Elevation Angle (Pitch)
+When the hammer rests on an uneven rock or terrain obstacle, the handle appears shorter in the camera image (perspective foreshortening). Because the physical tool dimensions are known and constant, the ratio between the head crossbar length and handle length gives the tilt angle:
+
+```
+cos(pitch) = L_handle / (L_head / R_0)
+pitch = arccos(cos(pitch))
+```
 
 ---
 
@@ -156,11 +168,11 @@ Evaluated on 174 real-world test frames under varying camera heights, rotations,
 | **Precision** | **100.0%** | Zero false detections |
 | **Recall** | **98.8%** | Rock-solid continuous frame tracking |
 | **Keypoint mAP@50-95** | **99.3%** | Sub-pixel keypoint regression |
-| **Inference Latency** | **1.4 ms** | **~700 FPS** on RTX 5050 Laptop GPU |
-| **Grip Location Error** | **$1.8\text{ px}$ ($\approx 1.2\text{ mm}$)** | Far smaller than gripper opening ($75\text{ mm}$) |
-| **Yaw Error** | **$\pm 0.8^\circ$** | High-precision wrist servo alignment |
+| **Inference Latency** | **1.4 ms** | ~700 FPS on RTX 5050 Laptop GPU |
+| **Grip Location Error** | **1.8 px (~1.2 mm)** | Far smaller than gripper opening (75 mm) |
+| **Yaw Error** | **+/- 0.8 deg** | High-precision wrist servo alignment |
 | **Roll / Flip Accuracy** | **100.0%** | Zero Left/Right classification errors |
-| **Pitch Error** | **$\pm 2.4^\circ$** | Accurately identifies propped up tools |
+| **Pitch Error** | **+/- 2.4 deg** | Accurately identifies propped up tools |
 
 ---
 

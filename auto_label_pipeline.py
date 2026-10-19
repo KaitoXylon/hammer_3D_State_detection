@@ -185,9 +185,9 @@ def extract_keypoints_5pt(mask, img_w, img_h):
     head_coords = coords[head_indices]
 
     projs_head = np.dot(head_coords - head_raw, axis_head)
-    t1, t2 = np.min(projs_head), np.max(projs_head)
-    pt1 = head_raw + t1 * axis_head
-    pt2 = head_raw + t2 * axis_head
+    # Take actual mask coordinates with extremal projections along head crossbar axis
+    pt1 = head_coords[np.argmin(projs_head)]
+    pt2 = head_coords[np.argmax(projs_head)]
 
     # 4. Disambiguate Face (blunt/denser) vs Claw (sharp/less dense)
     r_tip = 25
@@ -201,9 +201,9 @@ def extract_keypoints_5pt(mask, img_w, img_h):
     else:
         face_raw, claw_raw = pt2, pt1
 
-    # 5. Snap to medial distance transform maxima
+    # 5. Snap to medial distance transform maxima (Face snaps to medial face, Claw is at exact curved tip)
     face = snap_to_medial_spine(face_raw, dist_map, img_w, img_h, 20)
-    claw = snap_to_medial_spine(claw_raw, dist_map, img_w, img_h, 20)
+    claw = claw_raw  # Physical curved claw tip
     head_center = snap_to_medial_spine(head_raw, dist_map, img_w, img_h, 25)
     tail = snap_to_medial_spine(tail_raw, dist_map, img_w, img_h, 25)
     grip_raw = tail + 0.40 * (head_center - tail)
@@ -319,9 +319,10 @@ def render_preview_image(frame, kpts, mode=5):
         p_grip = tuple(grip.astype(int))
         p_tail = tuple(tail.astype(int))
 
-        # Skeleton lines
+        # Skeleton lines: Handle spine + Crossbar from head center
         cv2.line(dbg, p_tail, p_head, (0, 255, 255), 3)  # Yellow handle
-        cv2.line(dbg, p_claw, p_face, (0, 255, 255), 3)  # Yellow crossbar
+        cv2.line(dbg, p_head, p_face, (0, 255, 255), 3)  # Head to face
+        cv2.line(dbg, p_head, p_claw, (0, 255, 255), 3)  # Head to curved claw
 
         # K1: Face (Striking head - Red)
         cv2.circle(dbg, p_face, 12, (255, 255, 255), 2)
