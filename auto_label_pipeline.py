@@ -3,7 +3,7 @@
 ================================================================================
 AUTONOMOUS AUTO-LABELING PIPELINE FOR ROBOTIC TOOL POSE ESTIMATION
 ================================================================================
-University Rover Challenge (URC) - Delivery Mission / Astronaut Assistance
+Autonomous Robotic Tool Detection & 3D Pose Estimation Framework
 Author: Team Autonomous Systems
 
 A unified, end-to-end auto-labeling pipeline that transforms raw video into a

@@ -1,18 +1,35 @@
-# Autonomous Hammer 3D State & Flip Pose Estimation
+# Autonomous Tool 3D Spatial Pose & Orientation Framework
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/)
 [![YOLOv8-Pose](https://img.shields.io/badge/YOLOv8--Pose-Nano-green.svg)](https://docs.ultralytics.com/)
 [![Inference Speed](https://img.shields.io/badge/Inference-1.4ms%20%28~700%20FPS%29-brightgreen.svg)]()
 [![Keypoint Accuracy](https://img.shields.io/badge/mAP50--95-99.3%25-success.svg)]()
-### What Does This Repo Do?
-This repository provides an autonomous, real-time vision system that estimates the complete **3D spatial state (Grip Position, Roll / 3D Flip, Pitch, and Yaw)** of tools (such as hammers) using a standard monocular RGB camera and lightweight deep learning (YOLOv8-Pose).
 
-### What Problem Does It Solve?
-Standard 2D object detection (bounding boxes) is insufficient for robotic grasping and manipulation:
-1. **Missing Heading Angle (Yaw):** A bounding box cannot tell a robot arm what angle to rotate its wrist servo to match the tool handle.
-2. **Missing 3D Flip & Roll State:** Tools like hammers are physically asymmetric — they have a flat striking face on one side and a sharp curved claw on the other. Grasping a tool without knowing whether the claw faces **LEFT or RIGHT** causes gripper fingers to crash directly into the sharp claw spike.
-3. **Manual Labeling Bottleneck:** Training custom keypoint models traditionally requires manually clicking thousands of image annotations. This repository includes a fully automated pipeline using **FastSAM**, **PCA**, and **Euclidean Distance Transform** that generates thousands of verified, sub-pixel accurate keypoint labels directly from raw video with zero human intervention.
+## Framework Overview
+
+This framework provides an end-to-end, real-time monocular perception system for robotic tool detection, spatial orientation recovery, and autonomous grasp planning. By coupling deep keypoint regression (**YOLOv8-Pose**) with an automated foundation-model distillation pipeline (**FastSAM + PCA + Medial Axis Transform**), the architecture recovers the full 3D spatial state of tools:
+
+```
+State = [X_grip, Y_grip, Z_depth, Yaw (Heading), Pitch (Tilt), Roll (3D Flip)]
+```
+
+### Robotic Perception & Manipulation Challenges
+
+Conventional 2D object detection pipelines (bounding boxes) fail to support autonomous robotic pick-and-place for elongated, asymmetric tools:
+* **Planar Heading Ambiguity:** Axis-aligned bounding boxes do not provide tool heading angles, preventing wrist servo alignment.
+* **Topological Asymmetry & Collision Risks:** Tools such as claw hammers exhibit non-symmetric head geometries (flat striking face vs. curved sharp claw). Descending a parallel-jaw gripper without knowing the discrete axial roll state (face-up vs. face-down / claw-left vs. claw-right) causes the jaws to collide with or pinch the curved metal spike.
+* **Annotation Bottlenecks:** Training keypoint models traditionally demands thousands of manual click annotations. This framework automates the entire dataset curation cycle directly from raw video without human intervention.
+
+### Pipeline Architecture
+
+```
+[Monocular RGB Stream] ──> [YOLOv8-Pose Regression (1.4 ms)] ──> [Temporal EMA Filter]
+                                                                        │
+                                                                        ▼
+[Robot Arm Actuation] <── [Grasp Offset & Wrist Angle] <── [Spatial Kinematics Solver]
+                          (Flip Clearance + θ_claw)        (Yaw, Pitch, Signed Cross-Product)
+```
 
 ---
 

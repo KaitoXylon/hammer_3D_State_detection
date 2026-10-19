@@ -3,7 +3,7 @@
 ================================================================================
 5-KEYPOINT AUTO-LABELING PIPELINE: [HEAD, GRAB, TAIL + 2 HEAD POINTS (FACE, CLAW)]
 ================================================================================
-University Rover Challenge (URC) - 3D Pose & Flip Orientation
+Autonomous Robotic Tool Detection & 3D Flip Estimation Framework
 
 Dedicated standalone auto-labeler for the 5-point flip model:
   K1: Face (Striking Head Edge)          <-- Head Point 1

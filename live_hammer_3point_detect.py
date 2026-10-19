@@ -3,7 +3,7 @@
 ================================================================================
 3-KEYPOINT LIVE HAMMER TRACKER: [HEAD, GRAB, TAIL]
 ================================================================================
-University Rover Challenge (URC) - Autonomous Hammer Detection
+Autonomous Robotic Tool Detection & Pose Estimation Framework
 
 Live real-time tracker for the 3-point model:
   K1: Head Center (Striking head T-junction)

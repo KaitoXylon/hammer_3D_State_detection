@@ -3,7 +3,7 @@
 ================================================================================
 3-KEYPOINT AUTO-LABELING PIPELINE: [HEAD, GRAB, TAIL]
 ================================================================================
-University Rover Challenge (URC) - Autonomous Hammer Detection
+Autonomous Robotic Tool Detection & Pose Estimation Framework
 
 Dedicated standalone auto-labeler for the 3-point handle model:
   K1: Head Center (Striking head T-junction)
